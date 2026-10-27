@@ -1,8 +1,5 @@
 from pathlib import Path
 
-src_path = Path("/mnt/data/Văn bản đã dán (1)(3).txt")
-src = src_path.read_text(encoding="utf-8")
-
 # Add helper functions after classify_risk.
 needle = '''def classify_risk(probability):
     """
