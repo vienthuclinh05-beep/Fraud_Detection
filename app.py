@@ -1,3 +1,4 @@
+%%writefile app.py
 import os
 import joblib
 import numpy as np
@@ -6,13 +7,6 @@ import streamlit as st
 
 from features import FEATURE_COLS, RAW_REQUIRED, build_feature_frame
 from model_pipeline import (
-    C_MODEL,
-    C_REVIEW,
-    COST_FN,
-    COST_FP,
-    COST_TN,
-    COST_TP,
-    L_FN,
     FraudPipeline,
 )
 
@@ -1003,6 +997,59 @@ if result is not None:
                     },
                 )
 
+                # ----------------------------------------------------
+                # BIỂU ĐỒ SHAP WATERFALL
+                # ----------------------------------------------------
+                st.markdown("### Biểu đồ SHAP Waterfall")
+                st.caption(
+                    "Biểu đồ bắt đầu từ giá trị nền (E[f(X)]) rồi cộng/trừ "
+                    "đóng góp SHAP của từng đặc trưng để giải thích xác suất "
+                    "mà pipeline dự đoán. Đỏ làm tăng xác suất; xanh làm giảm."
+                )
+
+                try:
+                    import matplotlib.pyplot as plt
+
+                    # Dùng các đặc trưng gốc sau khi đã cộng các nhóm one-hot.
+                    # Các giá trị này vẫn nằm trên thang xác suất vì hàm dự đoán
+                    # đưa vào SHAP là predict_probability.
+                    waterfall_values = shap_table["SHAP value"].to_numpy(
+                        dtype=float
+                    )
+                    waterfall_names = [
+                        f"{row['Đặc trưng']} (giá trị: {row['Giá trị giao dịch']})"
+                        for _, row in shap_table.iterrows()
+                    ]
+                    base_value = float(
+                        np.asarray(shap_exp.base_values, dtype=float).reshape(-1)[0]
+                    )
+
+                    waterfall_explanation = shap.Explanation(
+                        values=waterfall_values,
+                        base_values=base_value,
+                        data=None,
+                        feature_names=waterfall_names,
+                    )
+
+                    fig = plt.figure(figsize=(12, max(5, min(10, 0.42 * len(waterfall_values) + 2))))
+                    shap.plots.waterfall(
+                        waterfall_explanation,
+                        max_display=min(15, len(waterfall_values)),
+                        show=False,
+                    )
+                    st.pyplot(plt.gcf(), clear_figure=True)
+                    plt.close("all")
+
+                    st.caption(
+                        f"Giá trị nền SHAP: {base_value:.4f}. Tổng giá trị nền "
+                        "và các đóng góp SHAP xấp xỉ đầu ra xác suất của mô hình; "
+                        "sai khác nhỏ có thể xuất hiện do phép xấp xỉ của explainer."
+                    )
+                except Exception as plot_error:
+                    st.warning("Chưa thể hiển thị biểu đồ SHAP Waterfall.")
+                    with st.expander("Chi tiết lỗi biểu đồ SHAP"):
+                        st.exception(plot_error)
+
                 positive = shap_table[
                     shap_table["SHAP value"] > 0
                 ].head(5)
@@ -1060,138 +1107,7 @@ if result is not None:
                 hide_index=True,
             )
 
-    if "is_fraud" in result.columns:
 
-        y = pd.to_numeric(
-            result["is_fraud"],
-            errors="coerce",
-        )
-
-        valid = y.isin([0, 1])
-
-        if valid.any():
-
-            actual = y.loc[valid].astype(int).to_numpy()
-
-            # Theo mô hình chi phí 3 mức, mọi giao dịch từ ngưỡng
-            # 5% trở lên đều được chuyển sang xác minh/cảnh báo.
-            alert = (
-                result.loc[valid, "probability"].to_numpy()
-                >= LOW_THRESHOLD
-            )
-
-            tp = int(
-                ((actual == 1) & (alert == 1)).sum()
-            )
-
-            fp = int(
-                ((actual == 0) & (alert == 1)).sum()
-            )
-
-            fn = int(
-                ((actual == 1) & (alert == 0)).sum()
-            )
-
-            tn = int(
-                ((actual == 0) & (alert == 0)).sum()
-            )
-
-            total_n = len(actual)
-
-            total_cost_value = (
-                fn * L_FN
-                + (tp + fp) * C_REVIEW
-                + total_n * C_MODEL
-            )
-
-            c1, c2, c3, c4, c5 = st.columns(5)
-
-            c1.metric("TP — cảnh báo đúng", f"{tp:,}")
-            c2.metric("FP — cảnh báo nhầm", f"{fp:,}")
-            c3.metric("FN — bỏ sót", f"{fn:,}")
-            c4.metric("TN — không cảnh báo đúng", f"{tn:,}")
-            c5.metric(
-                "Tổng chi phí ước tính",
-                f"${total_cost_value:,.2f}",
-            )
-
-            st.caption(
-                f"Đánh giá trên {total_n:,} dòng có nhãn 0/1 hợp lệ. "
-                f"Giao dịch có xác suất từ {LOW_THRESHOLD:.0%} trở lên "
-                "được tính là cần xác minh; giao dịch gian lận dưới "
-                "ngưỡng này được tính là bỏ sót."
-            )
-
-        else:
-            st.info(
-                "Cột is_fraud không có nhãn 0/1 hợp lệ, "
-                "nên không thể tính chi phí dựa trên nhãn thực tế."
-            )
-
-    else:
-        # Không có nhãn thật: chỉ tính chi phí kỳ vọng theo xác suất.
-        probabilities = result["probability"].astype(float).to_numpy()
-
-        alert = probabilities >= LOW_THRESHOLD
-
-        # Chi phí xác minh cho các giao dịch được cảnh báo.
-        review_cost = int(alert.sum()) * C_REVIEW
-
-        # Với giao dịch được thông qua, tính tổn thất kỳ vọng
-        # bằng xác suất gian lận nhân với mức tổn thất giả định.
-        missed_fraud_expected_cost = (
-            probabilities[~alert].sum() * L_FN
-        )
-
-        # Chi phí chấm điểm cho toàn bộ giao dịch.
-        scoring_cost = len(probabilities) * C_MODEL
-
-        expected_cost = (
-            review_cost
-            + missed_fraud_expected_cost
-            + scoring_cost
-        )
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "Chi phí xác minh",
-            f"${review_cost:,.2f}",
-        )
-
-        c2.metric(
-            "Tổn thất kỳ vọng do bỏ sót",
-            f"${missed_fraud_expected_cost:,.2f}",
-        )
-
-        c3.metric(
-            "Chi phí chấm điểm",
-            f"${scoring_cost:,.2f}",
-        )
-
-        st.metric(
-            "Tổng chi phí kỳ vọng",
-            f"${expected_cost:,.2f}",
-        )
-
-        st.caption(
-            "File không có nhãn thực tế nên không thể xác định TP, FP, "
-            "FN và TN. Kết quả trên là chi phí kỳ vọng dựa trên xác suất "
-            "mô hình, không phải chi phí thực tế."
-        )
-
-    with st.expander("Giải thích các thành phần chi phí"):
-
-        st.markdown(
-            f"""
-- **FN:** giao dịch gian lận bị bỏ sót, tổn thất giả định **${L_FN:.2f}/giao dịch**.
-- **TP + FP:** các giao dịch được chuyển sang xác minh, chi phí **${C_REVIEW:.2f}/giao dịch**.
-- **N:** tổng số giao dịch được chấm điểm, chi phí **${C_MODEL:.2f}/giao dịch**.
-- **Công thức:** `FN × L_FN + (TP + FP) × C_REVIEW + N × C_MODEL`.
-
-Các mức chi phí được lấy từ cấu hình mô hình của dự án. Cần bảo đảm cách tính này thống nhất với mô hình chi phí trong notebook.
-"""
-        )
 
 else:
     st.info(
