@@ -1,0 +1,3 @@
+__pycache__/
+*.csv
+!artifacts/demo_test_sample.csv
