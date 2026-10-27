@@ -1,103 +1,10 @@
-import os
-import joblib
-import pandas as pd
-import streamlit as st
+from pathlib import Path
 
-from features import RAW_REQUIRED, build_feature_frame
+src_path = Path("/mnt/data/Văn bản đã dán (1)(3).txt")
+src = src_path.read_text(encoding="utf-8")
 
-
-# ============================================================
-# 1. CẤU HÌNH ỨNG DỤNG
-# ============================================================
-
-LOW_THRESHOLD = 0.05
-HIGH_THRESHOLD = 0.12
-MAX_ROWS = 1_000_000
-
-st.set_page_config(
-    page_title="Fraud Detection System",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-# ============================================================
-# 2. GIAO DIỆN
-# ============================================================
-
-st.title("Hệ thống phát hiện giao dịch gian lận")
-
-st.markdown(
-    "Tải lên dữ liệu giao dịch để hệ thống đánh giá xác suất gian lận, "
-    "phân loại mức độ rủi ro và đưa ra hành động đề xuất."
-)
-
-# ============================================================
-# 3. TẢI MÔ HÌNH
-# ============================================================
-
-@st.cache_resource
-def load_pipeline():
-    possible_paths = [
-        os.path.join("artifacts", "pipeline.joblib"),
-        "pipeline.joblib",
-    ]
-
-    for path in possible_paths:
-        if os.path.exists(path):
-            return joblib.load(path), path
-
-    return None, None
-
-
-pipe, model_path = load_pipeline()
-
-
-# ============================================================
-# 4. ĐỌC FILE CSV / EXCEL
-# ============================================================
-
-def read_uploaded_file(uploaded_file):
-    """
-    Đọc file CSV hoặc Excel được tải lên.
-    Trả về DataFrame chứa toàn bộ giao dịch.
-    """
-
-    filename = uploaded_file.name.lower()
-
-    if filename.endswith(".csv"):
-        try:
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file)
-        except UnicodeDecodeError:
-            uploaded_file.seek(0)
-            df = pd.read_csv(
-                uploaded_file,
-                encoding="latin-1",
-            )
-
-    elif filename.endswith((".xlsx", ".xls")):
-        uploaded_file.seek(0)
-        df = pd.read_excel(uploaded_file)
-
-    else:
-        raise ValueError(
-            "Định dạng file không được hỗ trợ. "
-            "Vui lòng tải lên file CSV hoặc Excel."
-        )
-
-    # Chuẩn hóa tên cột để tránh lỗi do khoảng trắng
-    df.columns = df.columns.astype(str).str.strip()
-
-    return df
-
-
-# ============================================================
-# 5. PHÂN LOẠI MỨC ĐỘ RỦI RO
-# ============================================================
-
-def classify_risk(probability):
+# Add helper functions after classify_risk.
+needle = '''def classify_risk(probability):
     """
     Phân loại giao dịch dựa trên xác suất gian lận.
     """
@@ -109,609 +16,282 @@ def classify_risk(probability):
         return "Review", "Cần kiểm tra thêm"
 
     return "High risk", "Đề xuất chặn giao dịch"
+'''
+addition = needle + '''
 
 
 # ============================================================
-# 6. XỬ LÝ TOÀN BỘ GIAO DỊCH TRONG FILE
+# 5.1. GIẢI THÍCH DỰ ĐOÁN CHO MỘT GIAO DỊCH
 # ============================================================
 
-def process_batch(raw_df, pipeline):
+FEATURE_LABELS_VI = {
+    "time_diff": "Thời gian từ giao dịch trước (giây)",
+    "transactions_last_5min": "Số giao dịch trong 5 phút trước",
+    "transactions_last_1h": "Số giao dịch trong 1 giờ trước",
+    "transactions_last_24h": "Số giao dịch trong 24 giờ trước",
+    "amount_sum_1h": "Tổng tiền giao dịch trong 1 giờ trước",
+    "amount_sum_24h": "Tổng tiền giao dịch trong 24 giờ trước",
+    "amt": "Số tiền giao dịch hiện tại",
+    "customer_avg_amount": "Số tiền trung bình lịch sử của khách hàng",
+    "customer_amt_zscore": "Mức khác biệt số tiền so với lịch sử khách hàng",
+    "amt_zscore_cat": "Mức khác biệt số tiền trong cùng danh mục",
+    "amt_ratio_cat_max": "Tỷ lệ số tiền so với mức cao nhất trước đó trong danh mục",
+    "has_customer_history": "Có lịch sử giao dịch trước đó",
+    "amt_jump_ratio": "Tỷ lệ số tiền so với giao dịch liền trước",
+    "is_small_txn": "Giao dịch có số tiền nhỏ",
+    "n_small_online_24h": "Số giao dịch nhỏ trực tuyến trong 24 giờ trước",
+    "category": "Danh mục giao dịch",
+    "is_online_cat": "Giao dịch thuộc danh mục trực tuyến",
+    "is_new_merchant": "Cửa hàng mới với khách hàng",
+    "hour_sin": "Đặc trưng thời điểm giao dịch (sin)",
+    "hour_cos": "Đặc trưng thời điểm giao dịch (cos)",
+    "is_night": "Giao dịch diễn ra ban đêm",
+    "day_of_week": "Ngày trong tuần",
+    "distance_zscore": "Mức khác biệt khoảng cách so với lịch sử",
+    "if_score": "Điểm bất thường từ Isolation Forest",
+}
+
+
+def build_aligned_features(raw_df):
     """
-    Tiền xử lý và chấm điểm tất cả giao dịch trong file.
-    Giữ nguyên thứ tự giao dịch đầu vào.
+    Tạo đặc trưng và khôi phục đúng thứ tự dòng của file đầu vào.
+    Hàm tạo đặc trưng lịch sử có sắp xếp theo thời gian, vì vậy cần
+    khôi phục thứ tự ban đầu trước khi ghép với kết quả dự đoán.
     """
-
-    if raw_df.empty:
-        raise ValueError("File tải lên không có dữ liệu.")
-
-    if len(raw_df) > MAX_ROWS:
-        raise ValueError(
-            f"File có {len(raw_df):,} giao dịch, vượt giới hạn "
-            f"{MAX_ROWS:,} giao dịch mỗi lần xử lý."
-        )
-
-    # Kiểm tra các cột bắt buộc
-    missing_columns = [
-        col for col in RAW_REQUIRED
-        if col not in raw_df.columns
-    ]
-
-    if missing_columns:
-        raise ValueError(
-            "File thiếu các cột bắt buộc: "
-            + ", ".join(missing_columns)
-        )
-
-    # Giữ dữ liệu gốc để hiển thị kết quả
-    raw = raw_df.copy().reset_index(drop=True)
-
-    # Tạo đặc trưng theo đúng pipeline đã xây dựng
-    features = build_feature_frame(raw.copy())
-
-    if len(features) != len(raw):
-        raise ValueError(
-            "Số lượng giao dịch sau tiền xử lý không khớp "
-            "với dữ liệu đầu vào."
-        )
-
-    # Chấm điểm bằng pipeline đã huấn luyện
-    probabilities, anomaly_scores = pipeline.score_frame(features)
-
-    probabilities = pd.Series(probabilities).reset_index(drop=True)
-
-    if len(probabilities) != len(raw):
-        raise ValueError(
-            "Số xác suất dự đoán không khớp với số giao dịch đầu vào."
-        )
-
-    # Tạo bảng kết quả
-    results = pd.DataFrame(index=range(len(raw)))
-
-    # Giữ lại các thông tin giao dịch quan trọng nếu có
-    display_columns = [
-        "trans_date_trans_time",
-        "cc_num",
-        "merchant",
-        "category",
-        "amt",
-    ]
-
-    for col in display_columns:
-        if col in raw.columns:
-            results[col] = raw[col].values
-
-    # Nếu file có nhãn thật, giữ lại để đánh giá mô hình
-    if "is_fraud" in raw.columns:
-        results["is_fraud"] = raw["is_fraud"].values
-
-    # Xác suất gian lận
-    results["fraud_probability"] = probabilities.values
-    results["fraud_probability_pct"] = (
-        probabilities.values * 100
-    ).round(2)
-
-    # Điểm bất thường nếu pipeline trả về
-    if anomaly_scores is not None:
-        anomaly_scores = pd.Series(
-            anomaly_scores
-        ).reset_index(drop=True)
-
-        if len(anomaly_scores) == len(raw):
-            results["anomaly_score"] = anomaly_scores.values
-
-    # Phân loại rủi ro
-    classifications = [
-        classify_risk(float(probability))
-        for probability in probabilities
-    ]
-
-    results["risk_level"] = [
-        item[0] for item in classifications
-    ]
-
-    results["recommended_action"] = [
-        item[1] for item in classifications
-    ]
-
-    # Thêm số thứ tự giao dịch để dễ đối chiếu
-    results.insert(
-        0,
-        "transaction_row",
-        range(1, len(results) + 1),
+    work = raw_df.copy().reset_index(drop=True)
+    work["_original_row_position"] = range(len(work))
+    features = build_feature_frame(work)
+    features = (
+        features.sort_values("_original_row_position", kind="stable")
+        .drop(columns=["_original_row_position"])
+        .reset_index(drop=True)
     )
+    return features
 
-    return results
 
-
-# ============================================================
-# 7. TIÊU ĐỀ ỨNG DỤNG
-# ============================================================
-
-st.markdown(
-    '<div class="main-title">Hệ thống phát hiện giao dịch gian lận</div>',
-    unsafe_allow_html=True,
-)
-
-st.markdown(
+def explain_one_transaction(raw_df, row_position, pipeline, top_n=8):
     """
-    <div class="sub-title">
-    Tải lên dữ liệu giao dịch để hệ thống đánh giá xác suất gian lận,
-    phân loại mức độ rủi ro và đưa ra hành động đề xuất.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+    Giải thích dự đoán của XGBoost bằng feature contributions (SHAP values).
+    Giá trị đóng góp dương đẩy điểm dự đoán về phía gian lận; giá trị âm
+    kéo điểm dự đoán ra xa phía gian lận. Đây không phải xác suất riêng
+    của từng đặc trưng.
+    """
+    import xgboost as xgb
 
+    features = build_aligned_features(raw_df)
+    X_processed = pipeline.preprocess(features)
+    if_scores = pipeline._if_score(pipeline.if_model, X_processed)
+    X_e2 = pipeline.build_e2(X_processed, if_scores)
 
-# ============================================================
-# 8. THANH BÊN
-# ============================================================
+    booster = pipeline.xgb.get_booster()
+    contributions = booster.predict(
+        xgb.DMatrix(X_e2[row_position:row_position + 1]),
+        pred_contribs=True
+    )[0]
 
-with st.sidebar:
-    st.header("Thông tin hệ thống")
+    feature_names = getattr(pipeline, "feature_names_e2", None)
+    if not feature_names or len(feature_names) != len(contributions) - 1:
+        feature_names = [f"Đặc trưng {i + 1}" for i in range(len(contributions) - 1)]
 
-    if pipe is not None:
-        st.success("Đã tải mô hình thành công.")
-        st.caption(f"Mô hình: `{model_path}`")
-    else:
-        st.error("Không tìm thấy file mô hình.")
-        st.caption(
-            "Vui lòng kiểm tra artifacts/pipeline.joblib "
-            "hoặc pipeline.joblib."
-        )
-
-    st.divider()
-
-    st.subheader("Ngưỡng phân loại")
-
-    st.write(
-        f"**Rủi ro thấp:** Xác suất < {LOW_THRESHOLD:.0%}"
+    contribution_df = pd.DataFrame({
+        "feature": feature_names,
+        "contribution": contributions[:-1],
+    })
+    contribution_df["abs_contribution"] = contribution_df["contribution"].abs()
+    contribution_df = contribution_df.sort_values(
+        "abs_contribution", ascending=False
     )
 
-    st.write(
-        f"**Cần xem xét:** {LOW_THRESHOLD:.0%} đến "
-        f"dưới {HIGH_THRESHOLD:.0%}"
-    )
+    raw_features = features.iloc[row_position]
+    rows = []
+    for _, item in contribution_df.head(top_n).iterrows():
+        feature = item["feature"]
+        # Các biến one-hot có dạng category_xxx; giá trị của chúng nằm
+        # trong ma trận đã biến đổi nên hiển thị tên danh mục ở tên biến.
+        if feature.startswith("category_"):
+            label = f"Danh mục: {feature[len('category_'):]}"
+            value = "Biến mã hóa danh mục"
+        else:
+            label = FEATURE_LABELS_VI.get(feature, feature)
+            value = raw_features.get(feature, "Đặc trưng đã biến đổi")
+            if isinstance(value, (float, np.floating)):
+                value = round(float(value), 4)
+            elif isinstance(value, (np.integer,)):
+                value = int(value)
 
-    st.write(
-        f"**Rủi ro cao:** Xác suất ≥ {HIGH_THRESHOLD:.0%}"
-    )
-
-    st.divider()
-
-    st.caption(
-        "Kết quả là điểm đánh giá của mô hình, "
-        "không phải kết luận chắc chắn rằng giao dịch gian lận."
-    )
-
-
-# ============================================================
-# 9. KIỂM TRA MÔ HÌNH
-# ============================================================
-
-if pipe is None:
-    st.error(
-        "Ứng dụng chưa thể chấm điểm vì không tải được mô hình. "
-        "Hãy kiểm tra đường dẫn file pipeline.joblib."
-    )
-    st.stop()
-
-
-# ============================================================
-# 10. UPLOAD FILE
-# ============================================================
-
-st.subheader("1. Tải lên dữ liệu giao dịch")
-
-st.write(
-    "Chọn file CSV hoặc Excel chứa các giao dịch cần kiểm tra. "
-    "Hệ thống sẽ xử lý toàn bộ giao dịch trong file."
-)
-
-uploaded_file = st.file_uploader(
-    "Chọn file dữ liệu giao dịch",
-    type=["csv", "xlsx", "xls"],
-    accept_multiple_files=False,
-    max_upload_size=1024,
-    help="Hỗ trợ CSV, XLSX, XLS; dung lượng tối đa 1 GB.",
-)
-
-with st.expander("Xem các cột dữ liệu bắt buộc"):
-    st.write(
-        "File tải lên cần có đầy đủ các cột đầu vào mà "
-        "pipeline yêu cầu:"
-    )
-
-    st.code(
-        "\n".join(str(col) for col in RAW_REQUIRED),
-        language="text",
-    )
-
-    st.caption(
-        "Tên cột phải khớp với dữ liệu dùng trong bước "
-        "tiền xử lý và huấn luyện mô hình."
-    )
-
-
-# ============================================================
-# 11. CHẤM ĐIỂM DỮ LIỆU
-# ============================================================
-
-if uploaded_file is not None:
-
-    st.divider()
-    st.subheader("2. Kiểm tra dữ liệu đầu vào")
-
-    try:
-        raw_df = read_uploaded_file(uploaded_file)
-
-        if raw_df.empty:
-            st.error("File không có giao dịch để xử lý.")
-            st.stop()
-
-        missing_columns = [
-            col for col in RAW_REQUIRED
-            if col not in raw_df.columns
-        ]
-
-        if missing_columns:
-            st.error(
-                "File thiếu các cột bắt buộc: "
-                + ", ".join(missing_columns)
-            )
-
-            st.write("Các cột hiện có trong file:")
-            st.code(
-                "\n".join(str(col) for col in raw_df.columns),
-                language="text",
-            )
-
-            st.stop()
-
-        if len(raw_df) > MAX_ROWS:
-            st.error(
-                f"File có {len(raw_df):,} giao dịch. "
-                f"Giới hạn hiện tại là {MAX_ROWS:,} giao dịch."
-            )
-            st.stop()
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.metric(
-                "Số giao dịch",
-                f"{len(raw_df):,}",
-            )
-
-        with col2:
-            st.metric(
-                "Số cột dữ liệu",
-                f"{len(raw_df.columns):,}",
-            )
-
-        with col3:
-            st.metric(
-                "Giá trị bị thiếu",
-                f"{int(raw_df.isna().sum().sum()):,}",
-            )
-
-        with st.expander("Xem trước dữ liệu đầu vào"):
-            st.dataframe(
-                raw_df.head(10),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        if st.button(
-            "Phân tích toàn bộ giao dịch",
-            type="primary",
-            use_container_width=True,
-        ):
-
-            with st.spinner(
-                "Đang tiền xử lý dữ liệu và chấm điểm giao dịch..."
-            ):
-                results = process_batch(raw_df, pipe)
-
-            # Lưu kết quả vào session
-            st.session_state["batch_result"] = results
-            st.session_state["batch_filename"] = uploaded_file.name
-
-            st.success(
-                f"Đã hoàn tất phân tích {len(results):,} giao dịch."
-            )
-
-    except Exception as e:
-        st.error(f"Không thể xử lý file: {e}")
-
-
-# ============================================================
-# 12. HIỂN THỊ KẾT QUẢ
-# ============================================================
-
-if "batch_result" in st.session_state:
-
-    results = st.session_state["batch_result"].copy()
-
-    st.divider()
-    st.subheader("3. Kết quả phân tích")
-
-    st.caption(
-        f"File kết quả: {st.session_state.get('batch_filename', '')}"
-    )
-
-    total_transactions = len(results)
-
-    low_count = int(
-        (results["risk_level"] == "Low risk").sum()
-    )
-
-    review_count = int(
-        (results["risk_level"] == "Review").sum()
-    )
-
-    high_count = int(
-        (results["risk_level"] == "High risk").sum()
-    )
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric(
-            "Tổng giao dịch",
-            f"{total_transactions:,}",
-        )
-
-    with col2:
-        st.metric(
-            "Rủi ro thấp",
-            f"{low_count:,}",
-            f"{low_count / total_transactions:.1%}"
-            if total_transactions else "0%",
-        )
-
-    with col3:
-        st.metric(
-            "Cần xem xét",
-            f"{review_count:,}",
-            f"{review_count / total_transactions:.1%}"
-            if total_transactions else "0%",
-        )
-
-    with col4:
-        st.metric(
-            "Rủi ro cao",
-            f"{high_count:,}",
-            f"{high_count / total_transactions:.1%}"
-            if total_transactions else "0%",
-        )
-
-    # --------------------------------------------------------
-    # 12.1. BỘ LỌC KẾT QUẢ
-    # --------------------------------------------------------
-
-    st.markdown("### Lọc giao dịch")
-
-    filter_col1, filter_col2 = st.columns([1, 2])
-
-    with filter_col1:
-        selected_risks = st.multiselect(
-            "Mức độ rủi ro",
-            options=[
-                "Low risk",
-                "Review",
-                "High risk",
-            ],
-            default=[
-                "Low risk",
-                "Review",
-                "High risk",
-            ],
-        )
-
-    with filter_col2:
-        search_text = st.text_input(
-            "Tìm kiếm giao dịch",
-            placeholder=(
-                "Nhập mã thẻ, tên cửa hàng hoặc loại giao dịch..."
+        rows.append({
+            "Yếu tố": label,
+            "Giá trị giao dịch": str(value),
+            "Đóng góp vào dự đoán": float(item["contribution"]),
+            "Chiều tác động": (
+                "Tăng điểm gian lận"
+                if item["contribution"] > 0
+                else "Giảm điểm gian lận"
+                if item["contribution"] < 0
+                else "Gần như không tác động"
             ),
-        )
+        })
 
-    filtered_results = results[
-        results["risk_level"].isin(selected_risks)
-    ].copy()
+    explanation = pd.DataFrame(rows)
+    return explanation, float(contributions[-1])
+'''
 
-    if search_text.strip():
-        search_text = search_text.strip().lower()
+if needle not in src:
+    raise RuntimeError("Không tìm thấy vị trí chèn classify_risk")
 
-        searchable_columns = [
-            col for col in [
-                "cc_num",
-                "merchant",
-                "category",
-                "transaction_row",
-            ]
-            if col in filtered_results.columns
-        ]
+src = src.replace(needle, addition, 1)
 
-        if searchable_columns:
-            mask = pd.Series(
-                False,
-                index=filtered_results.index,
-            )
+# Ensure the scoring features align with the original uploaded row order.
+src = src.replace(
+    '    features = build_feature_frame(raw.copy())',
+    '    features = build_aligned_features(raw.copy())',
+    1
+)
 
-            for col in searchable_columns:
-                mask |= (
-                    filtered_results[col]
-                    .astype(str)
-                    .str.lower()
-                    .str.contains(
-                        search_text,
-                        regex=False,
-                        na=False,
-                    )
-                )
+# Save raw data for interactive explanations.
+src = src.replace(
+    '            st.session_state["batch_result"] = results\n'
+    '            st.session_state["batch_filename"] = uploaded_file.name',
+    '            st.session_state["batch_result"] = results\n'
+    '            st.session_state["batch_raw"] = raw_df.copy().reset_index(drop=True)\n'
+    '            st.session_state["batch_filename"] = uploaded_file.name',
+    1
+)
 
-            filtered_results = filtered_results[mask]
-
-    # Sắp xếp theo xác suất gian lận giảm dần
-    filtered_results = filtered_results.sort_values(
-        "fraud_probability",
-        ascending=False,
-    )
-
-    st.write(
-        f"Hiển thị **{len(filtered_results):,}** / "
-        f"**{total_transactions:,}** giao dịch."
-    )
-
-    # --------------------------------------------------------
-    # 12.2. HIỂN THỊ BẢNG
-    # --------------------------------------------------------
-
-    display_results = filtered_results.copy()
-
-    if "fraud_probability" in display_results.columns:
-        display_results["fraud_probability"] = (
-            display_results["fraud_probability"].map(
-                lambda x: f"{x:.4%}"
-            )
-        )
-
-    if "fraud_probability_pct" in display_results.columns:
-        display_results["fraud_probability_pct"] = (
-            display_results["fraud_probability_pct"].map(
-                lambda x: f"{x:.2f}%"
-            )
-        )
-
-    st.dataframe(
+# Replace static dataframe with selectable dataframe.
+old_table = '''    st.dataframe(
         display_results,
         use_container_width=True,
         hide_index=True,
         height=500,
     )
+'''
+new_table = '''    display_results = display_results.reset_index(drop=True)
+
+    st.caption(
+        "Chọn một dòng trong bảng để xem các đặc trưng đóng góp nhiều nhất "
+        "vào dự đoán của mô hình."
+    )
+    table_event = st.dataframe(
+        display_results,
+        use_container_width=True,
+        hide_index=True,
+        height=500,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="fraud_transaction_table",
+    )
 
     # --------------------------------------------------------
-    # 12.3. TẢI KẾT QUẢ
+    # 12.3. GIẢI THÍCH GIAO DỊCH ĐƯỢC CHỌN
     # --------------------------------------------------------
 
-    st.markdown("### Tải kết quả về máy")
+    selected_rows = table_event.selection.rows if table_event is not None else []
 
-    download_col1, download_col2 = st.columns(2)
+    if selected_rows:
+        selected_display_position = selected_rows[0]
+        if 0 <= selected_display_position < len(filtered_results):
+            selected_result = filtered_results.iloc[selected_display_position]
+            transaction_number = int(selected_result["transaction_row"])
+            raw_for_explanation = st.session_state.get("batch_raw")
 
-    with download_col1:
-        csv_data = results.to_csv(
-            index=False,
-            encoding="utf-8-sig",
-        )
+            st.markdown("### Vì sao giao dịch này bị cảnh báo?")
+            detail_col1, detail_col2, detail_col3 = st.columns(3)
 
-        st.download_button(
-            label="Tải toàn bộ kết quả (CSV)",
-            data=csv_data,
-            file_name="fraud_detection_results.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+            with detail_col1:
+                st.metric("Giao dịch số", f"#{transaction_number}")
 
-    with download_col2:
-        filtered_csv = filtered_results.to_csv(
-            index=False,
-            encoding="utf-8-sig",
-        )
+            with detail_col2:
+                st.metric(
+                    "Xác suất gian lận",
+                    f"{float(selected_result['fraud_probability']):.2%}"
+                )
 
-        st.download_button(
-            label="Tải kết quả đang lọc (CSV)",
-            data=filtered_csv,
-            file_name="filtered_fraud_results.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+            with detail_col3:
+                st.metric("Mức rủi ro", str(selected_result["risk_level"]))
 
-    # --------------------------------------------------------
-    # 12.4. ĐÁNH GIÁ NẾU FILE CÓ NHÃN THẬT
-    # --------------------------------------------------------
-
-    if "is_fraud" in results.columns:
-
-        st.divider()
-        st.subheader("4. Đánh giá đối chiếu với nhãn thực tế")
-
-        st.caption(
-            "Phần này chỉ xuất hiện khi file đầu vào có cột "
-            "`is_fraud`. Ngưỡng phân loại dùng để đối chiếu là "
-            f"{HIGH_THRESHOLD:.0%}."
-        )
-
-        try:
-            actual = pd.to_numeric(
-                results["is_fraud"],
-                errors="coerce",
+            st.write(
+                "**Cách đọc:** đóng góp dương làm tăng điểm dự đoán gian lận; "
+                "đóng góp âm làm giảm điểm dự đoán gian lận. Đây là đóng góp "
+                "trên thang điểm của mô hình, không phải phần trăm xác suất."
             )
 
-            valid_mask = actual.isin([0, 1])
-
-            actual = actual[valid_mask].astype(int)
-
-            predicted = (
-                results.loc[valid_mask, "fraud_probability"]
-                >= HIGH_THRESHOLD
-            ).astype(int)
-
-            tp = int(((actual == 1) & (predicted == 1)).sum())
-            tn = int(((actual == 0) & (predicted == 0)).sum())
-            fp = int(((actual == 0) & (predicted == 1)).sum())
-            fn = int(((actual == 1) & (predicted == 0)).sum())
-
-            metric1, metric2, metric3, metric4 = st.columns(4)
-
-            with metric1:
-                st.metric("True Positive", f"{tp:,}")
-
-            with metric2:
-                st.metric("True Negative", f"{tn:,}")
-
-            with metric3:
-                st.metric("False Positive", f"{fp:,}")
-
-            with metric4:
-                st.metric("False Negative", f"{fn:,}")
-
-            if (tp + fn) > 0:
-                recall = tp / (tp + fn)
-                st.write(
-                    f"**Recall:** {recall:.2%} "
-                    "— tỷ lệ giao dịch gian lận thực tế "
-                    "được mô hình phát hiện."
-                )
-
-            if (tp + fp) > 0:
-                precision = tp / (tp + fp)
-                st.write(
-                    f"**Precision:** {precision:.2%} "
-                    "— tỷ lệ giao dịch mô hình cảnh báo gian lận "
-                    "thực sự là gian lận."
-                )
-
-            if not valid_mask.all():
+            if raw_for_explanation is None:
                 st.warning(
-                    "Một số giá trị trong cột `is_fraud` không phải "
-                    "0 hoặc 1 nên đã được loại khỏi phần đánh giá."
+                    "Không tìm thấy dữ liệu gốc trong phiên hiện tại. "
+                    "Vui lòng tải file và chạy phân tích lại."
                 )
+            else:
+                try:
+                    explanation_df, _ = explain_one_transaction(
+                        raw_for_explanation,
+                        transaction_number - 1,
+                        pipe,
+                        top_n=8,
+                    )
 
-        except Exception as e:
-            st.warning(
-                f"Không thể tính các chỉ số đối chiếu: {e}"
-            )
+                    positive = explanation_df[
+                        explanation_df["Đóng góp vào dự đoán"] > 0
+                    ].copy()
+                    negative = explanation_df[
+                        explanation_df["Đóng góp vào dự đoán"] < 0
+                    ].copy()
 
+                    reason_col1, reason_col2 = st.columns(2)
 
-# ============================================================
-# 13. CHÂN TRANG
-# ============================================================
+                    with reason_col1:
+                        st.markdown("#### Yếu tố làm tăng điểm gian lận")
+                        if positive.empty:
+                            st.info("Không có yếu tố đóng góp dương trong nhóm đặc trưng hiển thị.")
+                        else:
+                            st.dataframe(
+                                positive.sort_values(
+                                    "Đóng góp vào dự đoán", ascending=False
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
 
-st.divider()
+                    with reason_col2:
+                        st.markdown("#### Yếu tố làm giảm điểm gian lận")
+                        if negative.empty:
+                            st.info("Không có yếu tố đóng góp âm trong nhóm đặc trưng hiển thị.")
+                        else:
+                            st.dataframe(
+                                negative.sort_values(
+                                    "Đóng góp vào dự đoán", ascending=True
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
 
-st.caption(
-    "Fraud Detection System | Công cụ hỗ trợ sàng lọc giao dịch. "
-    "Các cảnh báo cần được đánh giá cùng bối cảnh nghiệp vụ."
+                    st.caption(
+                        "Giải thích được tính từ đóng góp của các đặc trưng trong "
+                        "XGBoost cho giao dịch đã chọn. Đây là tín hiệu hỗ trợ "
+                        "rà soát, không phải bằng chứng xác nhận gian lận."
+                    )
+                except Exception as e:
+                    st.error(
+                        "Chưa thể tạo giải thích cho giao dịch này. "
+                        f"Chi tiết lỗi: {e}"
+                    )
+'''
+if old_table not in src:
+    raise RuntimeError("Không tìm thấy bảng kết quả để thay thế")
+src = src.replace(old_table, new_table, 1)
+
+# Renumber the following subsection headings to remain tidy.
+src = src.replace(
+    '# 12.3. TẢI KẾT QUẢ',
+    '# 12.4. TẢI KẾT QUẢ',
+    1
+).replace(
+    '# 12.4. ĐÁNH GIÁ NẾU FILE CÓ NHÃN THẬT',
+    '# 12.5. ĐÁNH GIÁ NẾU FILE CÓ NHÃN THẬT',
+    1
 )
+
+out_path = Path("/mnt/data/app_fraud_explain.py")
+out_path.write_text(src, encoding="utf-8")
+print(f"Đã tạo file: {out_path}")
+print(f"Số dòng: {len(src.splitlines())}")
