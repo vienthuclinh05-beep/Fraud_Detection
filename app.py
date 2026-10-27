@@ -1060,67 +1060,6 @@ if result is not None:
                 hide_index=True,
             )
 
-
-    # 12. MÔ HÌNH CHI PHÍ
-    # ========================================================
-
-    st.divider()
-    st.subheader("4. Mô hình chi phí giả định")
-
-    st.caption(
-        "Các tham số được lấy từ model_pipeline.py. "
-        "Đây là giả định phục vụ nghiên cứu, không phải chi phí "
-        "thực tế đã được xác nhận của ngân hàng."
-    )
-
-    cost_info1, cost_info2, cost_info3 = st.columns(3)
-
-    cost_info1.metric(
-        "Tổn thất bỏ sót gian lận",
-        f"${L_FN:,.2f}",
-    )
-
-    cost_info2.metric(
-        "Chi phí xác minh",
-        f"${C_REVIEW:,.2f}",
-    )
-
-    cost_info3.metric(
-        "Chi phí chấm điểm",
-        f"${C_MODEL:,.2f}",
-    )
-
-    cost_matrix = pd.DataFrame(
-        [
-            [COST_TP, COST_FN],
-            [COST_FP, COST_TN],
-        ],
-        index=[
-            "Thực tế: Fraud",
-            "Thực tế: Normal",
-        ],
-        columns=[
-            "Dự đoán: Cảnh báo",
-            "Dự đoán: Không cảnh báo",
-        ],
-    )
-
-    st.markdown("### Ma trận chi phí")
-
-    st.dataframe(
-        cost_matrix.style.format("${:,.2f}"),
-        use_container_width=True,
-    )
-
-    st.markdown("### Công thức chi phí")
-
-    st.code(
-        f"Total Cost = FN × {L_FN:g} "
-        f"+ (TP + FP) × {C_REVIEW:g} "
-        f"+ N × {C_MODEL:g}",
-        language="text",
-    )
-
     if "is_fraud" in result.columns:
 
         y = pd.to_numeric(
